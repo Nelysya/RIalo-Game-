@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tap‑Tap Stairs</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    body { background: #0f1020; color: #fff; overflow: hidden; }
+    canvas { display:block; width:100vw; height:100vh; }
+    .ui { position: fixed; inset: 0; pointer-events: none; display: grid; place-items: start stretch; }
+    .topbar { pointer-events: none; display:flex; justify-content: space-between; align-items:center; padding: 12px 16px; gap:12px; }
+    .pill { background: rgba(255,255,255,0.1); backdrop-filter: blur(8px); border:1px solid rgba(255,255,255,0.18); border-radius: 999px; padding: 6px 12px; font-weight:600; letter-spacing: .2px; }
+    .btns { pointer-events: auto; display:flex; gap:8px; }
+    button { pointer-events:auto; background: rgba(255,255,255,0.12); color:#fff; border:1px solid rgba(255,255,255,0.22); border-radius: 999px; padding:8px 12px; font-weight:600; cursor:pointer; transition: transform .06s ease, background .2s ease; }
+    button:hover { transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    .center { position: fixed; inset: 0; display:grid; place-items:center; pointer-events:none; }
+    .card { pointer-events:auto; text-align:center; background: rgba(10,10,20,.6); border:1px solid rgba(255,255,255,.15); border-radius: 16px; padding: 18px 16px; max-width: 480px; box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+    .title { font-size: clamp(24px, 4vw, 36px); font-weight: 800; margin: 2px 0 10px; letter-spacing: .3px; }
+    .muted { opacity:.8; }
+    .kbd { display:inline-block; border:1px solid rgba(255,255,255,.25); border-bottom-width:2px; border-radius:6px; padding:1px 6px; font-weight:700; font-size:.95em; }
+    .hint { font-size: 14px; opacity:.85; }
+    .hidden { display:none; }
+    .slider { width: 160px; vertical-align: middle; }
+    .footer-help { position:fixed; inset-inline:0; bottom:8px; text-align:center; opacity:.9; font-size:13px; }
+    a { color:#9adfff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div class="ui">
+    <div class="topbar">
+      <div class="pill" id="score">Score: 0</div>
+      <div class="btns">
+        <button id="bgBtn" title="Use your background image (URL)">Background…</button>
+        <button id="restartBtn">Restart</button>
+      </div>
+    </div>
+  </div>
+  <div class="center" id="intro">
+    <div class="card">
+      <div class="title">Tap‑Tap Stairs</div>
+      <p class="muted">Tap / click / <span class="kbd">Space</span> to switch direction and climb as far as you can. Don’t step off the stairs!</p>
+      <p class="hint">Best played with one finger / one key. The path is endless and gets faster 🔥</p>
+      <div style="margin-top:10px">
+        <button id="startBtn">Start</button>
+      </div>
+    </div>
+  </div>
+  <div class="center hidden" id="gameover">
+    <div class="card">
+      <div class="title">Game Over</div>
+      <div style="margin:6px 0 12px" id="final"></div>
+      <button id="againBtn">Play again</button>
+    </div>
+  </div>
+  <div class="footer-help">Tip: klik <strong>Background…</strong> untuk pakai gambar latar kamu sendiri.</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  // Logical units
+  let W = 0, H = 0, DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  const TILE = 32;           // base tile size in CSS px (scaled by DPR at draw time)
+  const SPEED_START = 2.2;   // base player speed (tiles/sec)
+  const SPEED_GAIN = 0.0009; // acceleration over time
+
+  // Game state
+  let path = [];             // array of tiles {x,y}
+  let dir = 1;               // current move dir: +1 = right/up, -1 = left/up
+  let player = { x: 0, y: 0, px:0, py:0 }; // px/py are precise float positions in tiles
+  let running = false;
+  let elapsed = 0;           // seconds since start
+  let speed = SPEED_START;   // tiles per second along the path
+  let score = 0, best = 0;
+  let camY = 0;              // camera offset in tiles (keeps player ~center)
+  let bgImage = null;
+
+  function resize() {
+    const dpr = DPR;
+    W = Math.floor(window.innerWidth * dpr);
+    H = Math.floor(window.innerHeight * dpr);
+    canvas.width = W; canvas.height = H;
+    canvas.style.width = '100vw'; canvas.style.height = '100vh';
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Utility: random int in [a,b]
+  const ri = (a,b) => Math.floor(a + Math.random()*(b-a+1));
+
+  function reset() {
+    // Initialize a straight center column upward, then randomize
+    path.length = 0;
+    const startX = 0, startY = 0;
+    path.push({x:startX, y:startY});
+    // Seed a few straightforward steps to ease in
+    for (let i=1;i<12;i++) path.push({ x: startX, y: startY - i });
+    // Now build an endless zig‑zag path
+    while (path.length < 400) addNextTile();
+
+    dir = 1; // start moving right/up
+    player.px = startX; player.py = startY;
+    player.x = startX;  player.y = startY;
+    score = 0; elapsed = 0; speed = SPEED_START; camY = 4;
+  }
+
+  function addNextTile() {
+    const last = path[path.length-1];
+    const turn = Math.random() < 0.5 ? -1 : 1; // left or right
+    const next = { x: last.x + turn, y: last.y - 1 };
+    path.push(next);
+  }
+
+  function extendPathIfNeeded() {
+    // ensure we always have many tiles ahead of the player
+    while (path.length < 600) addNextTile();
+  }
+
+  function posToPix(xTiles, yTiles) {
+    // Isometric‑ish projection to look like stairs
+    const size = TILE * DPR;
+    const isoX = (xTiles) * size * 0.9;   // horizontal spacing
+    const isoY = (yTiles) * size * 0.7;   // vertical spacing
+    // Center horizontally
+    const cx = W/2;
+    return { x: cx + isoX, y: H*0.65 + (isoY + camY * TILE * 0.7 * DPR) };
+  }
+
+  function drawBg() {
+    if (bgImage && bgImage.complete) {
+      // Cover
+      const iw = bgImage.naturalWidth, ih = bgImage.naturalHeight;
+      const rCanvas = W/H, rImg = iw/ih;
+      let dw, dh;
+      if (rImg > rCanvas) { dh = H; dw = dh * rImg; }
+      else { dw = W; dh = dw / rImg; }
+      ctx.globalAlpha = 0.9; // slightly dim for contrast
+      ctx.drawImage(bgImage, (W-dw)/2, (H-dh)/2, dw, dh);
+      ctx.globalAlpha = 1;
+    } else {
+      const g = ctx.createLinearGradient(0,0,0,H);
+      g.addColorStop(0, '#0b1027');
+      g.addColorStop(1, '#1e1655');
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,W,H);
+      // soft glow
+      const rg = ctx.createRadialGradient(W*0.5,H*0.25, 0, W*0.5,H*0.25, H*0.7);
+      rg.addColorStop(0, 'rgba(255,255,255,0.08)');
+      rg.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = rg; ctx.fillRect(0,0,W,H);
+    }
+  }
+
+  function drawTile(tx, ty, highlight=false) {
+    const p = posToPix(tx, ty);
+    const s = TILE * DPR;
+    const w = s * 0.9, h = s * 0.5;
+    // base (shadow)
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath();
+    ctx.roundRect(p.x - w/2, p.y - h/2 + h*0.22, w, h, 8);
+    ctx.fill();
+    // top
+    const c1 = highlight ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.85)';
+    const c2 = highlight ? 'rgba(120,200,255,0.95)' : 'rgba(120,170,255,0.9)';
+    const grad = ctx.createLinearGradient(p.x, p.y-h/2, p.x, p.y+h/2);
+    grad.addColorStop(0, c1); grad.addColorStop(1, c2);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.roundRect(p.x - w/2, p.y - h/2, w, h, 8);
+    ctx.fill();
+  }
+
+  function drawPlayer() {
+    const p = posToPix(player.px, player.py);
+    const r = TILE * DPR * 0.28;
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath(); ctx.ellipse(p.x, p.y + r*0.8, r*0.9, r*0.45, 0, 0, Math.PI*2); ctx.fill();
+    // body
+    const g = ctx.createLinearGradient(p.x, p.y-r, p.x, p.y+r);
+    g.addColorStop(0,'#9ad0ff'); g.addColorStop(1,'#2d7bff');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(p.x, p.y - r*0.3, r, 0, Math.PI*2); ctx.fill();
+    // face dot
+    ctx.fillStyle = '#0b1b3a';
+    ctx.beginPath(); ctx.arc(p.x + r*0.25, p.y - r*0.35, r*0.18, 0, Math.PI*2); ctx.fill();
+  }
+
+  function update(dt) {
+    if (!running) return;
+    elapsed += dt; speed += SPEED_GAIN * dt * 1000; // tiny accel
+
+    // Move player along current diagonal direction
+    const step = speed * dt; // tiles progressed this frame
+    player.px += (dir) * step; // x changes by +/- step
+    player.py -= step;         // always going up
+
+    // Camera follows
+    camY = Math.min(camY, player.py - 3);
+
+    // Check if player is still on a tile (within tolerance)
+    const ix = Math.round(player.px);
+    const iy = Math.round(player.py);
+
+    // find if (ix,iy) exists in path set (use hash for speed)
+    if (!tileExists(ix, iy)) {
+      gameOver();
+      return;
+    }
+
+    // scoring: every time we pass to a new integer y, +1
+    const ny = Math.floor(-player.py);
+    score = Math.max(score, ny);
+    scoreEl.textContent = `Score: ${score}`;
+
+    extendPathIfNeeded();
+  }
+
+  // Build a quick set for membership test
+  let pathSet = new Set();
+  function rebuildSet() {
+    pathSet = new Set(path.map(t => `${t.x},${t.y}`));
+  }
+  function tileExists(x,y) { return pathSet.has(`${x},${y}`); }
+
+  function draw() {
+    drawBg();
+
+    // Draw a window of tiles around the player for performance
+    const minY = Math.round(player.py) - 18, maxY = Math.round(player.py) + 10;
+    for (let i=0;i<path.length;i++) {
+      const t = path[i];
+      if (t.y < minY || t.y > maxY) continue;
+      const highlight = (Math.abs(t.x - Math.round(player.px)) + Math.abs(t.y - Math.round(player.py)) === 0);
+      drawTile(t.x, t.y, highlight);
+    }
+
+    drawPlayer();
+  }
+
+  // --- Input ---
+  function toggleDirection() { if (!running) return; dir *= -1; }
+  window.addEventListener('pointerdown', e => { e.preventDefault(); toggleDirection(); }, {passive:false});
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); toggleDirection(); }
+  });
+
+  // Background image loader
+  document.getElementById('bgBtn').addEventListener('click', async () => {
+    const url = prompt('Masukkan URL gambar latar (jpg/png). Kosongkan untuk reset.');
+    if (!url) { bgImage = null; return; }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => { bgImage = img; };
+    img.onerror = () => { alert('Gagal memuat gambar. Coba URL lain.'); };
+    img.src = url;
+  });
+
+  // UI buttons
+  const scoreEl = document.getElementById('score');
+  const intro = document.getElementById('intro');
+  const over = document.getElementById('gameover');
+  document.getElementById('startBtn').onclick = () => { intro.classList.add('hidden'); start(); };
+  document.getElementById('againBtn').onclick = () => { over.classList.add('hidden'); start(); };
+  document.getElementById('restartBtn').onclick = () => start();
+
+  function start() {
+    reset(); rebuildSet(); running = true; intro.classList.add('hidden'); over.classList.add('hidden');
+  }
+
+  function gameOver() {
+    running = false; best = Math.max(best, score);
+    const final = document.getElementById('final');
+    final.innerHTML = `<div class="muted">Score: <strong>${score}</strong> • Best: <strong>${best}</strong></div>`;
+    over.classList.remove('hidden');
+  }
+
+  // Main loop
+  let last = performance.now();
+  function loop(t) {
+    const dt = Math.min(0.033, (t - last) / 1000); // clamp delta (30 FPS max step)
+    last = t; update(dt); draw(); requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
